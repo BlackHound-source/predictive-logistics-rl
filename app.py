@@ -1,856 +1,2423 @@
 # ============================================================
-# PREDICTIVE LOGISTICS MANAGEMENT SYSTEM (TACTICAL EDITION)
+# TACTICAL PREDICTIVE LOGISTICS MANAGEMENT SYSTEM
 # ============================================================
-# DEPLOYMENT TARGET: Render / Hugging Face / Lightning AI / Local
+# Render-ready deployment
+#
+# Components:
+#   1. Polynomial Temporal Demand Forecasting
+#   2. Geospatial Digital Twin
+#   3. TL-RL Agent
+#   4. RD3P Agent
+#   5. Feasibility Constraint Layer
+#   6. 50/50 RL Ensemble
+#   7. Gradio Command Console
+#
+# Deployment:
+#   - Render compatible
+#   - Uses Render's PORT automatically
+#   - No Gradio share server
+#   - No external map API key
+#   - OpenStreetMap tiles
 # ============================================================
 
 import os
-import json
-import pickle
 import random
 import warnings
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import folium
+
+from sklearn.linear_model import Ridge
+from sklearn.preprocessing import PolynomialFeatures
+from sklearn.pipeline import make_pipeline
+
 
 warnings.filterwarnings("ignore")
 
+
 # ============================================================
-# 1. GRADIO IMPORT
+# GRADIO
 # ============================================================
 
 try:
     import gradio as gr
 except ImportError:
-    os.system("pip -q install -U gradio")
-    import gradio as gr
+    raise ImportError(
+        "Gradio is not installed. "
+        "Run: pip install -r requirements.txt"
+    )
+
 
 # ============================================================
-# 2. DIRECTORIES & PATHS (ADAPTIVE CLOUD / LOCAL PATHS)
+# 1. NETWORK TOPOLOGY
 # ============================================================
 
-# Auto-detect if running on Kaggle or a standard cloud server / local
-if Path("/kaggle/working").exists():
-    BASE_DIR = Path("/kaggle/working")
-else:
-    BASE_DIR = Path(".")
+NODES = {
 
-FORECAST_DIR = BASE_DIR / "logistics_forecasting_results"
-OUTPUT_DIR = BASE_DIR / "PREDICTIVE_LOGISTICS_RL_MVP"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    "DEPOT_MAIN": {
+        "name": "Rear Staging Base (RSB-01)",
+        "lat": 34.1526,
+        "lon": 77.5771,
+        "role": "Supply Hub"
+    },
 
-FORECAST_FILE = FORECAST_DIR / "six_month_forecast.csv"
-FORECAST_MODEL_FILE = FORECAST_DIR / "logistics_demand_forecaster.joblib"
+    "NODE_TRANSIT": {
+        "name": "Intermediate Logistics Node (ILN-North)",
+        "lat": 34.3500,
+        "lon": 77.6200,
+        "role": "Transit Chokepoint"
+    },
 
-# ============================================================
-# 3. DEMAND FORECAST LOADER
-# ============================================================
+    "FOB_ALPHA": {
+        "name": "Forward Operating Base (FOB-Alpha)",
+        "lat": 34.6000,
+        "lon": 77.7000,
+        "role": "Forward Staging Depot"
+    },
 
-fallback_forecast = [
-    15451.29,
-    16742.14,
-    16753.92,
-    16945.08,
-    17069.82,
-    16969.06
+    "POST_SIERRA": {
+        "name": "High-Altitude Forward Post (Sierra)",
+        "lat": 34.8500,
+        "lon": 77.7800,
+        "role": "Terminal Sector"
+    }
+}
+
+
+PRIMARY_ROUTE = [
+
+    [34.1526, 77.5771],
+    [34.3500, 77.6200],
+    [34.6000, 77.7000],
+    [34.8500, 77.7800]
+
 ]
 
-def load_forecast():
-    values = []
-    if FORECAST_FILE.exists():
-        try:
-            data = pd.read_csv(FORECAST_FILE)
-            preferred_columns = []
-            for column in data.columns:
-                name = str(column).lower()
-                if any(term in name for term in ["forecast", "prediction", "demand"]):
-                    preferred_columns.append(column)
 
-            if len(preferred_columns) > 0:
-                selected_column = preferred_columns[-1]
-            else:
-                numeric_cols = data.select_dtypes(include=[np.number]).columns.tolist()
-                selected_column = numeric_cols[-1] if len(numeric_cols) > 0 else None
+ALTERNATE_ROUTE = [
 
-            if selected_column is not None:
-                values = pd.to_numeric(data[selected_column], errors="coerce").dropna().tolist()
-        except Exception:
-            pass
+    [34.1526, 77.5771],
+    [34.2800, 77.4500],
+    [34.5200, 77.5300],
+    [34.8500, 77.7800]
 
-    if len(values) < 6:
-        values = fallback_forecast
+]
 
-    return [float(max(1.0, x)) for x in values[:6]]
-
-forecast_values = load_forecast()
 
 # ============================================================
-# 4. ACTION SPACE & GLOBAL CONFIGURATION
+# 2. TEMPORAL DEMAND FORECASTING
+# ============================================================
+
+def train_temporal_demand_model():
+
+    np.random.seed(42)
+
+    t = np.arange(
+        1,
+        25
+    ).reshape(
+        -1,
+        1
+    )
+
+    base_demand = (
+
+        14000.0
+
+        + 150.0 * t.flatten()
+
+        + 1200.0
+        * np.sin(
+            t.flatten() / 2.0
+        )
+
+        + np.random.normal(
+            0,
+            300,
+            24
+        )
+    )
+
+    model = make_pipeline(
+
+        PolynomialFeatures(
+            degree=2
+        ),
+
+        Ridge(
+            alpha=1.0
+        )
+    )
+
+    model.fit(
+        t,
+        base_demand
+    )
+
+    return model
+
+
+demand_model = (
+    train_temporal_demand_model()
+)
+
+
+def forecast_demand(
+    month_idx: int,
+    operational_surge: float = 1.0
+):
+
+    t_eval = np.array(
+        [[25 + month_idx]]
+    )
+
+    predicted = (
+        demand_model
+        .predict(t_eval)[0]
+    )
+
+    return float(
+        max(
+            1000.0,
+            predicted
+            * operational_surge
+        )
+    )
+
+
+# ============================================================
+# 3. ACTION SPACE
 # ============================================================
 
 ACTIONS = [
+
     "NORMAL SUPPLY",
+
     "FORWARD REPLENISHMENT",
+
     "PRIORITY REPLENISHMENT",
+
     "ALTERNATE ROUTE",
+
     "RESERVE CAPACITY"
+
 ]
 
-ACTION_IDS = {action: index for index, action in enumerate(ACTIONS)}
+
+ACTION_IDS = {
+
+    action: index
+
+    for index, action
+    in enumerate(ACTIONS)
+
+}
+
 
 STATE_BINS = 4
-TRAIN_EPISODES = 12000
-STEPS_PER_EPISODE = 6
+
 ALPHA = 0.12
+
 GAMMA = 0.93
-TL_EPSILON_START = 0.30
-TL_EPSILON_END = 0.02
-RD3P_TOLERANCE = 0.50
-RANDOM_SEED_TL = 123
-RANDOM_SEED_RD3P = 456
+
 
 # ============================================================
-# 5. STATE REPRESENTATION & DECODER
+# UTILITIES
 # ============================================================
 
-def clip01(value):
-    return float(np.clip(float(value), 0.0, 1.0))
+def clip01(v):
 
-def make_state(inventory, demand, weather, route, capacity, trend, priority):
-    demand = max(float(demand), 1.0)
-    inventory_ratio = clip01(float(inventory) / demand)
-    demand_pressure = clip01(float(demand) / 25000.0)
-    weather = clip01(weather)
-    route = clip01(route)
-    capacity = clip01(capacity)
-    trend_normalized = clip01((float(trend) + 0.20) / 0.70)
-    priority = clip01(priority)
-
-    return np.array(
-        [
-            inventory_ratio,
-            demand_pressure,
-            weather,
-            route,
-            capacity,
-            trend_normalized,
-            priority
-        ],
-        dtype=np.float32
+    return float(
+        np.clip(
+            float(v),
+            0.0,
+            1.0
+        )
     )
 
+
+def make_state(
+    inventory,
+    demand,
+    weather,
+    route,
+    capacity,
+    trend,
+    priority
+):
+
+    demand = max(
+        float(demand),
+        1.0
+    )
+
+    return np.array(
+
+        [
+
+            clip01(
+                float(inventory)
+                / demand
+            ),
+
+            clip01(
+                float(demand)
+                / 25000.0
+            ),
+
+            clip01(weather),
+
+            clip01(route),
+
+            clip01(capacity),
+
+            clip01(
+                (
+                    float(trend)
+                    + 0.20
+                )
+                / 0.70
+            ),
+
+            clip01(priority)
+
+        ],
+
+        dtype=np.float32
+
+    )
+
+
 def discretize(state):
-    state = np.asarray(state, dtype=np.float32)
-    bins = np.floor(state * STATE_BINS).astype(int)
-    bins = np.clip(bins, 0, STATE_BINS - 1)
-    return tuple(int(value) for value in bins)
 
-def state_to_physical(state):
-    state = np.asarray(state, dtype=np.float32)
-    inventory_ratio = float(state[0])
-    demand_pressure = float(state[1])
-    weather = float(state[2])
-    route = float(state[3])
-    capacity = float(state[4])
-    trend_normalized = float(state[5])
-    priority = float(state[6])
+    bins = np.floor(
+        state * STATE_BINS
+    ).astype(int)
 
-    demand = max(1.0, demand_pressure * 25000.0)
-    inventory = inventory_ratio * demand
-    trend = trend_normalized * 0.70 - 0.20
+    bins = np.clip(
+        bins,
+        0,
+        STATE_BINS - 1
+    )
 
-    return {
-        "inventory": inventory,
-        "demand": demand,
-        "weather": weather,
-        "route": route,
-        "capacity": capacity,
-        "trend": trend,
-        "priority": priority
-    }
+    return tuple(
+        int(v)
+        for v in bins
+    )
+
 
 # ============================================================
-# 6. FEASIBILITY MASK
+# FEASIBILITY LAYER
 # ============================================================
 
-def feasible_actions(state):
-    physical = state_to_physical(state)
-    inventory = physical["inventory"]
-    demand = physical["demand"]
-    route = physical["route"]
-    capacity = physical["capacity"]
+def feasible_actions(
+    inventory,
+    demand,
+    route,
+    capacity
+):
 
-    coverage = inventory / max(demand, 1.0)
-    actions = list(range(len(ACTIONS)))
+    cov = (
+        inventory
+        / max(
+            demand,
+            1.0
+        )
+    )
 
-    if route >= 0.70:
-        alternate_id = ACTION_IDS["ALTERNATE ROUTE"]
-        if alternate_id in actions:
-            actions.remove(alternate_id)
+    allowed = list(
+        range(
+            len(ACTIONS)
+        )
+    )
 
-    if capacity >= 0.70:
-        reserve_id = ACTION_IDS["RESERVE CAPACITY"]
-        if reserve_id in actions:
-            actions.remove(reserve_id)
+    # Primary corridor healthy
+    if (
 
-    if coverage >= 1.10:
-        for action_name in ["FORWARD REPLENISHMENT", "PRIORITY REPLENISHMENT"]:
-            action_id = ACTION_IDS[action_name]
-            if action_id in actions:
-                actions.remove(action_id)
-    elif coverage >= 0.95:
-        priority_id = ACTION_IDS["PRIORITY REPLENISHMENT"]
-        if priority_id in actions:
-            actions.remove(priority_id)
+        route >= 0.70
 
-    if len(actions) == 0:
-        actions = [ACTION_IDS["NORMAL SUPPLY"]]
+        and ACTION_IDS[
+            "ALTERNATE ROUTE"
+        ] in allowed
 
-    return actions
+    ):
 
-# ============================================================
-# 7. LOGISTICS DIGITAL TWIN ENVIRONMENT
-# ============================================================
-
-class LogisticsEnvironment:
-    def __init__(self, seed=42):
-        self.rng = np.random.default_rng(seed)
-
-    def reset(self):
-        month = int(self.rng.integers(0, len(forecast_values)))
-        demand = float(forecast_values[month])
-        inventory_ratio = float(self.rng.uniform(0.15, 1.25))
-        inventory = demand * inventory_ratio
-        weather = float(self.rng.uniform(0.0, 1.0))
-        route = float(self.rng.uniform(0.30, 1.0))
-        capacity = float(self.rng.uniform(0.30, 1.0))
-        trend = float(self.rng.uniform(-0.15, 0.35))
-        priority = float(self.rng.uniform(0.20, 1.0))
-
-        return {
-            "inventory": inventory,
-            "demand": demand,
-            "weather": weather,
-            "route": route,
-            "capacity": capacity,
-            "trend": trend,
-            "priority": priority
-        }
-
-    def step(self, state, action):
-        current = dict(state)
-        demand_noise = float(self.rng.normal(0.0, 0.025))
-        weather_factor = 1.0 + 0.12 * current["weather"]
-        trend_factor = 1.0 + 0.35 * current["trend"]
-        demand = current["demand"] * weather_factor * trend_factor * (1.0 + demand_noise)
-        demand = max(1.0, demand)
-
-        coverage_before = current["inventory"] / demand
-        shortage_before = max(0.0, 1.0 - coverage_before)
-
-        new_inventory = current["inventory"]
-        new_route = current["route"]
-        new_capacity = current["capacity"]
-
-        if action == ACTION_IDS["FORWARD REPLENISHMENT"]:
-            new_inventory += 0.18 * current["demand"] * current["capacity"]
-            new_capacity -= 0.05
-        elif action == ACTION_IDS["PRIORITY REPLENISHMENT"]:
-            new_inventory += 0.30 * current["demand"] * current["capacity"]
-            new_capacity -= 0.12
-        elif action == ACTION_IDS["ALTERNATE ROUTE"]:
-            new_route += 0.30
-            new_capacity -= 0.05
-        elif action == ACTION_IDS["RESERVE CAPACITY"]:
-            new_capacity += 0.25
-
-        new_inventory -= 0.12 * demand
-        new_inventory = max(0.0, new_inventory)
-
-        if current["weather"] > 0.65:
-            new_route -= (current["weather"] - 0.65) * 0.20
-        if current["weather"] > 0.75:
-            new_capacity -= (current["weather"] - 0.75) * 0.15
-
-        new_route = clip01(new_route)
-        new_capacity = clip01(new_capacity)
-
-        new_weather = clip01(current["weather"] + float(self.rng.normal(0.0, 0.04)))
-        new_trend = float(np.clip(current["trend"] + float(self.rng.normal(0.0, 0.025)), -0.20, 0.50))
-        new_demand = max(
-            1.0,
-            current["demand"] * np.clip(1.0 + 0.04 * current["trend"] + demand_noise * 0.30, 0.90, 1.10)
+        allowed.remove(
+            ACTION_IDS[
+                "ALTERNATE ROUTE"
+            ]
         )
 
-        next_state = {
-            "inventory": new_inventory,
-            "demand": new_demand,
-            "weather": new_weather,
-            "route": new_route,
-            "capacity": new_capacity,
-            "trend": new_trend,
-            "priority": current["priority"]
-        }
 
-        coverage_after = new_inventory / max(demand, 1.0)
-        shortage_after = max(0.0, 1.0 - coverage_after)
+    # Fleet capacity healthy
+    if (
 
-        reward = 10.0
-        reward -= 50.0 * shortage_after
-        inventory_risk = max(0.0, 0.85 - coverage_after)
-        reward -= 20.0 * inventory_risk
-        route_risk = max(0.0, 0.70 - new_route)
-        reward -= 20.0 * route_risk
-        capacity_risk = max(0.0, 0.70 - new_capacity)
-        reward -= 15.0 * capacity_risk
+        capacity >= 0.70
 
-        if coverage_before < 0.55:
-            if action == ACTION_IDS["PRIORITY REPLENISHMENT"]:
-                reward += 30.0
-            elif action == ACTION_IDS["FORWARD REPLENISHMENT"]:
-                reward += 18.0
-            elif action == ACTION_IDS["NORMAL SUPPLY"]:
-                reward -= 20.0
-        elif coverage_before < 0.80:
-            if action == ACTION_IDS["FORWARD REPLENISHMENT"]:
-                reward += 22.0
-            elif action == ACTION_IDS["PRIORITY REPLENISHMENT"]:
-                reward += 18.0
-        else:
-            if action == ACTION_IDS["NORMAL SUPPLY"]:
-                reward += 10.0
+        and ACTION_IDS[
+            "RESERVE CAPACITY"
+        ] in allowed
 
-        if current["route"] < 0.55 and action == ACTION_IDS["ALTERNATE ROUTE"]:
-            reward += 25.0
-        if current["capacity"] < 0.55 and action == ACTION_IDS["RESERVE CAPACITY"]:
-            reward += 25.0
-        if current["priority"] > 0.75 and coverage_before < 0.75:
-            if action == ACTION_IDS["PRIORITY REPLENISHMENT"]:
-                reward += 10.0
+    ):
 
-        info = {
-            "coverage_before": coverage_before,
-            "coverage_after": coverage_after,
-            "shortage_before": shortage_before,
-            "shortage_after": shortage_after
-        }
+        allowed.remove(
+            ACTION_IDS[
+                "RESERVE CAPACITY"
+            ]
+        )
 
-        return next_state, float(reward), info
+
+    # Healthy stock
+    if cov >= 1.10:
+
+        for action in [
+
+            "FORWARD REPLENISHMENT",
+            "PRIORITY REPLENISHMENT"
+
+        ]:
+
+            aid = ACTION_IDS[action]
+
+            if aid in allowed:
+
+                allowed.remove(aid)
+
+
+    # Moderate stock
+    elif cov >= 0.95:
+
+        aid = ACTION_IDS[
+            "PRIORITY REPLENISHMENT"
+        ]
+
+        if aid in allowed:
+
+            allowed.remove(aid)
+
+
+    if not allowed:
+
+        return [
+            ACTION_IDS[
+                "NORMAL SUPPLY"
+            ]
+        ]
+
+    return allowed
+
 
 # ============================================================
-# 8. RL MODELS (WITH NEAREST-NEIGHBOR RESOLUTION)
+# 4. TL-RL AGENT
 # ============================================================
 
 class TLRLAgent:
-    def __init__(self, alpha=ALPHA, gamma=GAMMA):
-        self.alpha = alpha
-        self.gamma = gamma
+
+    """
+    Two-Lane Reinforcement Learning agent.
+
+    Maintains an active policy lane while retaining
+    inactive counterfactual action information.
+    """
+
+    def __init__(self):
+
         self.q = {}
+
         self.active_lane = {}
+
         self.inactive_memory = {}
+
         self.visit_counts = {}
 
-    def q_values(self, state_key):
-        if state_key in self.q:
-            return self.q[state_key]
+
+    def _ensure_state(self, k):
+
+        if k not in self.q:
+
+            self.q[k] = np.zeros(
+                len(ACTIONS),
+                dtype=np.float64
+            )
+
+            self.visit_counts[k] = 0
+
+
+    def q_values(self, k):
+
+        if k in self.q:
+
+            return self.q[k]
+
 
         if len(self.q) > 0:
-            target = np.array(state_key, dtype=np.float32)
-            nearest_key = min(
-                self.q.keys(),
-                key=lambda k: np.sum((np.array(k, dtype=np.float32) - target) ** 2)
+
+            target = np.array(
+                k,
+                dtype=np.float32
             )
-            return self.q[nearest_key].copy()
 
-        self.q[state_key] = np.zeros(len(ACTIONS), dtype=np.float64)
-        return self.q[state_key]
+            nearest = min(
 
-    def choose(self, state, epsilon=0.0):
-        state_key = discretize(state)
-        q = self.q_values(state_key)
-        actions = feasible_actions(state)
+                self.q.keys(),
 
-        if epsilon > 0.0 and random.random() < epsilon:
-            selected = random.choice(actions)
+                key=lambda x:
+
+                np.sum(
+
+                    (
+                        np.array(
+                            x,
+                            dtype=np.float32
+                        )
+                        - target
+                    ) ** 2
+
+                )
+            )
+
+            return self.q[
+                nearest
+            ].copy()
+
+
+        self._ensure_state(k)
+
+        return self.q[k]
+
+
+    def choose(
+        self,
+        state_key,
+        allowed,
+        epsilon=0.0
+    ):
+
+        self._ensure_state(
+            state_key
+        )
+
+        q = self.q_values(
+            state_key
+        )
+
+
+        if (
+
+            epsilon > 0.0
+
+            and random.random()
+            < epsilon
+
+        ):
+
+            selected = random.choice(
+                allowed
+            )
+
         else:
-            selected = max(actions, key=lambda action: q[action])
 
-        self.active_lane[state_key] = selected
-        self.inactive_memory[state_key] = {
-            action: float(q[action])
-            for action in actions
-            if action != selected
+            selected = max(
+
+                allowed,
+
+                key=lambda a:
+                q[a]
+
+            )
+
+
+        self.active_lane[
+            state_key
+        ] = selected
+
+
+        self.inactive_memory[
+            state_key
+        ] = {
+
+            a: float(q[a])
+
+            for a in allowed
+
+            if a != selected
+
         }
+
+
         return selected
 
-    def update(self, state, action, reward, next_state):
-        state_key = discretize(state)
-        next_key = discretize(next_state)
 
-        if state_key not in self.q:
-            self.q[state_key] = np.zeros(len(ACTIONS), dtype=np.float64)
-        if next_key not in self.q:
-            self.q[next_key] = np.zeros(len(ACTIONS), dtype=np.float64)
+    def update(
+        self,
+        k,
+        a,
+        r,
+        next_k,
+        allowed_next
+    ):
 
-        q = self.q[state_key]
-        next_q = self.q[next_key]
-        next_actions = feasible_actions(next_state)
-        best_next = max(next_q[action_id] for action_id in next_actions)
-        target = reward + self.gamma * best_next
+        self._ensure_state(k)
 
-        q[action] += self.alpha * (target - q[action])
-        self.visit_counts[state_key] = self.visit_counts.get(state_key, 0) + 1
+        next_q = self.q_values(
+            next_k
+        )
 
+        best_next = max(
+
+            next_q[an]
+
+            for an in allowed_next
+
+        )
+
+
+        self.q[k][a] += (
+
+            ALPHA
+            * (
+                r
+                + GAMMA * best_next
+                - self.q[k][a]
+            )
+
+        )
+
+
+        self.visit_counts[k] += 1
+
+
+# ============================================================
+# 5. RD3P AGENT
+# ============================================================
 
 class RD3PAgent:
-    def __init__(self, alpha=ALPHA, gamma=GAMMA, tolerance=RD3P_TOLERANCE):
-        self.alpha = alpha
-        self.gamma = gamma
-        self.tolerance = tolerance
-        self.q = {}
-        self.target = 12.0
-        self.target_history = []
-        self.visit_counts = {}
 
-    def q_values(self, state_key):
-        if state_key in self.q:
-            return self.q[state_key]
+    """
+    Reward-Deficit-Driven Projection Policy.
+
+    Uses projected returns, confidence bounds and
+    dynamic target recalibration.
+    """
+
+    def __init__(
+        self,
+        target_return=30.0,
+        tolerance_buffer=5.0
+    ):
+
+        self.q = {}
+
+        self.counts = {}
+
+        self.target_0 = (
+            target_return
+            - tolerance_buffer
+        )
+
+        self.current_target = (
+            self.target_0
+        )
+
+        self.smoothed_q = {}
+
+
+    def _ensure_state(self, k):
+
+        if k not in self.q:
+
+            self.q[k] = np.zeros(
+                len(ACTIONS),
+                dtype=np.float64
+            )
+
+
+        if k not in self.counts:
+
+            self.counts[k] = np.zeros(
+                len(ACTIONS),
+                dtype=np.int32
+            )
+
+
+        if k not in self.smoothed_q:
+
+            self.smoothed_q[k] = np.zeros(
+                len(ACTIONS),
+                dtype=np.float64
+            )
+
+
+    def q_values(self, k):
+
+        if k in self.q:
+
+            return self.q[k]
+
 
         if len(self.q) > 0:
-            target = np.array(state_key, dtype=np.float32)
-            nearest_key = min(
-                self.q.keys(),
-                key=lambda k: np.sum((np.array(k, dtype=np.float32) - target) ** 2)
+
+            target = np.array(
+                k,
+                dtype=np.float32
             )
-            return self.q[nearest_key].copy()
 
-        self.q[state_key] = np.zeros(len(ACTIONS), dtype=np.float64)
-        return self.q[state_key]
+            nearest = min(
 
-    def choose(self, state, steps_left=1):
-        state_key = discretize(state)
-        q = self.q_values(state_key)
-        actions = feasible_actions(state)
-        values = np.array([q[action_id] for action_id in actions], dtype=np.float64)
+                self.q.keys(),
 
-        best_value = float(np.max(values))
-        projected_return = best_value * max(1, steps_left)
-        deficit = self.target - projected_return
+                key=lambda x:
 
-        if deficit > self.tolerance:
-            uncertainty = 0.10 + min(1.50, deficit / (abs(self.target) + 1.0))
-            noise = np.random.normal(0.0, uncertainty, len(actions))
-            scores = values + noise
-        else:
-            scores = values
+                np.sum(
 
-        selected_index = int(np.argmax(scores))
-        return actions[selected_index]
+                    (
+                        np.array(
+                            x,
+                            dtype=np.float32
+                        )
+                        - target
+                    ) ** 2
 
-    def update(self, state, action, reward, next_state):
-        state_key = discretize(state)
-        next_key = discretize(next_state)
+                )
+            )
 
-        if state_key not in self.q:
-            self.q[state_key] = np.zeros(len(ACTIONS), dtype=np.float64)
-        if next_key not in self.q:
-            self.q[next_key] = np.zeros(len(ACTIONS), dtype=np.float64)
+            return self.q[
+                nearest
+            ].copy()
 
-        q = self.q[state_key]
-        next_q = self.q[next_key]
-        next_actions = feasible_actions(next_state)
-        best_next = max(next_q[action_id] for action_id in next_actions)
-        target = reward + self.gamma * best_next
 
-        q[action] += self.alpha * (target - q[action])
-        self.visit_counts[state_key] = self.visit_counts.get(state_key, 0) + 1
+        self._ensure_state(k)
+
+        return self.q[k]
+
+
+    def choose(
+        self,
+        state_key,
+        allowed,
+        steps_left=1,
+        accum_reward=0.0
+    ):
+
+        self._ensure_state(
+            state_key
+        )
+
+        q = self.q_values(
+            state_key
+        )
+
+        counts = self.counts[
+            state_key
+        ]
+
+
+        best_arm = max(
+
+            allowed,
+
+            key=lambda a:
+            q[a]
+
+        )
+
+
+        sm_q = self.smoothed_q[
+            state_key
+        ]
+
+
+        projected_return = (
+
+            accum_reward
+
+            + (
+
+                sm_q[best_arm]
+                * max(
+                    1,
+                    steps_left
+                )
+
+            )
+
+        )
+
+
+        # Target achieved
+        if (
+            projected_return
+            >= self.current_target
+        ):
+
+            return best_arm
+
+
+        # Reward deficit
+        total_visits = (
+            np.sum(counts)
+            + 1
+        )
+
+
+        confidence_bounds = (
+
+            q
+
+            + 2.0
+            * np.sqrt(
+
+                np.log(
+                    total_visits
+                    + 1e-5
+                )
+
+                /
+
+                (
+                    counts
+                    + 1e-5
+                )
+
+            )
+
+        )
+
+
+        proj_explore = (
+
+            accum_reward
+
+            + (
+
+                confidence_bounds
+                * max(
+                    1,
+                    steps_left
+                )
+
+            )
+
+        )
+
+
+        candidates = [
+
+            a
+
+            for a in allowed
+
+            if proj_explore[a]
+            >= self.current_target
+
+        ]
+
+
+        if candidates:
+
+            return max(
+
+                candidates,
+
+                key=lambda a:
+                confidence_bounds[a]
+
+            )
+
+
+        # Dynamic recalibration
+        best_possible = max(
+
+            proj_explore[a]
+
+            for a in allowed
+
+        )
+
+
+        recal_factor = min(
+
+            1.0,
+
+            max(
+
+                0.01,
+
+                best_possible
+                / max(
+                    self.target_0,
+                    1e-6
+                )
+
+            )
+
+        )
+
+
+        self.current_target = (
+
+            recal_factor
+            * self.target_0
+
+        )
+
+
+        return max(
+
+            allowed,
+
+            key=lambda a:
+            confidence_bounds[a]
+
+        )
+
+
+    def update(
+        self,
+        k,
+        a,
+        r,
+        next_k,
+        allowed_next
+    ):
+
+        self._ensure_state(k)
+
+        next_q = self.q_values(
+            next_k
+        )
+
+
+        best_next = max(
+
+            next_q[an]
+
+            for an in allowed_next
+
+        )
+
+
+        self.q[k][a] += (
+
+            ALPHA
+
+            * (
+
+                r
+
+                + GAMMA * best_next
+
+                - self.q[k][a]
+
+            )
+
+        )
+
+
+        self.counts[k][a] += 1
+
+
+        self.smoothed_q[k][a] = (
+
+            0.8
+            * self.smoothed_q[k][a]
+
+            + 0.2 * r
+
+        )
+
 
 # ============================================================
-# 9. TRAINING INITIALIZATION & PERSISTENCE
+# INITIALIZE AGENTS
 # ============================================================
 
-print("Executing Adaptive RL Policy Training...")
-
-random.seed(RANDOM_SEED_TL)
-np.random.seed(RANDOM_SEED_TL)
 tl_agent = TLRLAgent()
-tl_environment = LogisticsEnvironment(seed=RANDOM_SEED_TL)
 
-for episode in range(TRAIN_EPISODES):
-    state = tl_environment.reset()
-    epsilon_decay = episode / max(1, TRAIN_EPISODES - 1)
-    epsilon = TL_EPSILON_START * (1.0 - epsilon_decay) + TL_EPSILON_END * epsilon_decay
-
-    for step in range(STEPS_PER_EPISODE):
-        state_vector = make_state(
-            state["inventory"], state["demand"], state["weather"],
-            state["route"], state["capacity"], state["trend"], state["priority"]
-        )
-        action = tl_agent.choose(state_vector, epsilon=epsilon)
-        next_state, reward, _ = tl_environment.step(state, action)
-        next_vector = make_state(
-            next_state["inventory"], next_state["demand"], next_state["weather"],
-            next_state["route"], next_state["capacity"], next_state["trend"], next_state["priority"]
-        )
-        tl_agent.update(state_vector, action, reward, next_vector)
-        state = next_state
-
-random.seed(RANDOM_SEED_RD3P)
-np.random.seed(RANDOM_SEED_RD3P)
 rd3p_agent = RD3PAgent()
-rd3p_environment = LogisticsEnvironment(seed=RANDOM_SEED_RD3P)
 
-for episode in range(TRAIN_EPISODES):
-    state = rd3p_environment.reset()
-
-    for step in range(STEPS_PER_EPISODE):
-        state_vector = make_state(
-            state["inventory"], state["demand"], state["weather"],
-            state["route"], state["capacity"], state["trend"], state["priority"]
-        )
-        action = rd3p_agent.choose(state_vector, steps_left=(STEPS_PER_EPISODE - step))
-        next_state, reward, _ = rd3p_environment.step(state, action)
-        next_vector = make_state(
-            next_state["inventory"], next_state["demand"], next_state["weather"],
-            next_state["route"], next_state["capacity"], next_state["trend"], next_state["priority"]
-        )
-        rd3p_agent.update(state_vector, action, reward, next_vector)
-        state = next_state
 
 # ============================================================
-# 10. DECISION ENGINE & RISK MODEL
+# 6. RL TRAINING
 # ============================================================
 
-def normalized_scores(q_values, actions):
-    values = np.array([float(q_values[action]) for action in actions], dtype=np.float64)
-    if len(values) == 1:
-        return {actions[0]: 1.0}
-    minimum, maximum = float(np.min(values)), float(np.max(values))
-    spread = maximum - minimum
-    if spread < 1e-12:
-        normalized = np.ones(len(values)) / len(values)
-    else:
-        normalized = (values - minimum) / spread
-    return {action: float(score) for action, score in zip(actions, normalized)}
+print(
+    "Executing Adaptive Dual RL Policy Training..."
+)
 
-def calculate_risk(inventory, demand, weather, route, capacity, priority):
-    coverage = inventory / max(demand, 1.0)
-    shortage_ratio = max(0.0, 1.0 - coverage)
-    inventory_component = min(1.0, shortage_ratio / 0.70)
-    score = (
-        0.40 * inventory_component
-        + 0.20 * weather
-        + 0.20 * (1.0 - route)
-        + 0.15 * (1.0 - capacity)
-        + 0.05 * priority
-    )
-    if score >= 0.70:
-        level = "CRITICAL"
-    elif score >= 0.45:
-        level = "HIGH"
-    elif score >= 0.25:
-        level = "MEDIUM"
-    else:
-        level = "LOW"
-    return float(score), level, float(coverage), float(shortage_ratio)
 
-def run_logistics_decision(month, inventory, demand, weather, route, capacity, trend, priority):
-    month = int(np.clip(month, 0, len(forecast_values) - 1))
-    inventory = max(0.0, float(inventory))
-    demand = max(1.0, float(demand))
-    weather, route, capacity, priority = clip01(weather), clip01(route), clip01(capacity), clip01(priority)
-    trend = float(np.clip(trend, -0.20, 0.50))
+rng = np.random.default_rng(
+    42
+)
 
-    state_vector = make_state(inventory, demand, weather, route, capacity, trend, priority)
-    state_key = discretize(state_vector)
-    allowed = feasible_actions(state_vector)
 
-    tl_q = tl_agent.q_values(state_key)
-    rd_q = rd3p_agent.q_values(state_key)
+# Render environment variable can control this.
+# Default remains 3500 to preserve your original behavior.
+TRAINING_EPISODES = int(
 
-    tl_scores = normalized_scores(tl_q, allowed)
-    rd_scores = normalized_scores(rd_q, allowed)
-
-    combined_scores = {action: 0.50 * tl_scores[action] + 0.50 * rd_scores[action] for action in allowed}
-
-    tl_action_id = max(allowed, key=lambda a: tl_scores[a])
-    rd_action_id = max(allowed, key=lambda a: rd_scores[a])
-    final_action_id = max(allowed, key=lambda a: combined_scores[a])
-
-    coverage = inventory / max(demand, 1.0)
-    shortage = max(0.0, demand - inventory)
-    shortage_percent = (shortage / max(demand, 1.0)) * 100.0
-    risk_score, risk_level, coverage, shortage_ratio = calculate_risk(
-        inventory, demand, weather, route, capacity, priority
+    os.environ.get(
+        "RL_TRAINING_EPISODES",
+        "3500"
     )
 
-    policy_agreement = (tl_action_id == rd_action_id)
-    sorted_scores = sorted(combined_scores.values(), reverse=True)
-    score_gap = (sorted_scores[0] - sorted_scores[1]) if len(sorted_scores) >= 2 else 1.0
+)
 
-    if policy_agreement and score_gap >= 0.20:
-        confidence = "HIGH"
-    elif score_gap >= 0.10:
-        confidence = "MEDIUM"
-    else:
-        confidence = "LOW"
 
-    reasons = []
-    if inventory < demand:
-        reasons.append("Inventory deficit detected.")
-    else:
-        reasons.append("Sufficient inventory buffer.")
-    if weather >= 0.70:
-        reasons.append("Severe meteorological resistance.")
-    if route < 0.55:
-        reasons.append("Primary line-of-communication degraded.")
-    if capacity < 0.55:
-        reasons.append("Transport throughput constrained.")
-    if trend > 0.15:
-        reasons.append("Demand escalation pattern active.")
-    if priority >= 0.75:
-        reasons.append("Strategic sector priority designated.")
+for ep in range(
+    TRAINING_EPISODES
+):
 
-    policy_rows = []
-    for action_id, action_name in enumerate(ACTIONS):
-        if action_id in allowed:
-            policy_rows.append([
-                action_name,
-                round(tl_scores[action_id], 4),
-                round(rd_scores[action_id], 4),
-                round(combined_scores[action_id], 4),
-                "FEASIBLE"
-            ])
-        else:
-            policy_rows.append([action_name, None, None, None, "FILTERED"])
-
-    policy_score_df = pd.DataFrame(
-        policy_rows,
-        columns=["Action", "Tactical Policy", "Strategic Policy", "Ensemble Score", "Operational Status"]
+    inv = float(
+        rng.uniform(
+            3000,
+            20000
+        )
     )
 
-    return {
-        "month": month,
-        "base_forecast": forecast_values[month],
-        "demand": demand,
-        "inventory": inventory,
-        "weather": weather,
-        "route": route,
-        "capacity": capacity,
-        "trend": trend,
-        "priority": priority,
-        "coverage": coverage,
-        "shortage": shortage,
-        "shortage_percent": shortage_percent,
-        "risk_score": risk_score,
-        "risk_level": risk_level,
-        "allowed": allowed,
-        "tl_action": ACTIONS[tl_action_id],
-        "rd_action": ACTIONS[rd_action_id],
-        "final_action": ACTIONS[final_action_id],
-        "policy_agreement": policy_agreement,
-        "score_gap": score_gap,
-        "confidence": confidence,
-        "reason": " ".join(reasons),
-        "policy_score_df": policy_score_df
+
+    dem = float(
+        rng.uniform(
+            10000,
+            18000
+        )
+    )
+
+
+    weather = float(
+        rng.uniform(
+            0,
+            1
+        )
+    )
+
+
+    route = float(
+        rng.uniform(
+            0.2,
+            1.0
+        )
+    )
+
+
+    capacity = float(
+        rng.uniform(
+            0.3,
+            1.0
+        )
+    )
+
+
+    accum_r_rd = 0.0
+
+    steps = 6
+
+
+    for step in range(steps):
+
+        state = make_state(
+
+            inv,
+
+            dem,
+
+            weather,
+
+            route,
+
+            capacity,
+
+            0.05,
+
+            0.75
+
+        )
+
+
+        state_key = discretize(
+            state
+        )
+
+
+        allowed = feasible_actions(
+
+            inv,
+
+            dem,
+
+            route,
+
+            capacity
+
+        )
+
+
+        epsilon = max(
+
+            0.02,
+
+            0.30
+            * (
+
+                1.0
+
+                - ep
+                / max(
+                    TRAINING_EPISODES,
+                    1
+                )
+
+            )
+
+        )
+
+
+        act_tl = tl_agent.choose(
+
+            state_key,
+
+            allowed,
+
+            epsilon=epsilon
+
+        )
+
+
+        act_rd = rd3p_agent.choose(
+
+            state_key,
+
+            allowed,
+
+            steps_left=(
+                steps - step
+            ),
+
+            accum_reward=accum_r_rd
+
+        )
+
+
+        # ----------------------------------------------------
+        # Environment feedback
+        # ----------------------------------------------------
+
+        coverage = (
+
+            inv
+            / max(
+                dem,
+                1.0
+            )
+
+        )
+
+
+        shortage = max(
+
+            0.0,
+
+            1.0 - coverage
+
+        )
+
+
+        reward = (
+
+            10.0
+
+            - 45.0 * shortage
+
+            - 15.0
+            * max(
+                0.0,
+                0.70 - route
+            )
+
+            - 12.0
+            * max(
+                0.0,
+                0.70 - capacity
+            )
+
+        )
+
+
+        # Replenishment
+        if coverage < 0.60:
+
+            if act_tl in [
+
+                ACTION_IDS[
+                    "FORWARD REPLENISHMENT"
+                ],
+
+                ACTION_IDS[
+                    "PRIORITY REPLENISHMENT"
+                ]
+
+            ]:
+
+                reward += 28.0
+
+
+        # Alternate route
+        if (
+
+            route < 0.55
+
+            and act_tl
+            == ACTION_IDS[
+                "ALTERNATE ROUTE"
+            ]
+
+        ):
+
+            reward += 25.0
+
+
+        # Reserve capacity
+        if (
+
+            capacity < 0.55
+
+            and act_tl
+            == ACTION_IDS[
+                "RESERVE CAPACITY"
+            ]
+
+        ):
+
+            reward += 22.0
+
+
+        accum_r_rd += reward
+
+
+        # ----------------------------------------------------
+        # State transition
+        # ----------------------------------------------------
+
+        inv = max(
+
+            0.0,
+
+            inv
+            - 0.15 * dem
+
+        )
+
+
+        next_state = make_state(
+
+            inv,
+
+            dem,
+
+            weather,
+
+            route,
+
+            capacity,
+
+            0.05,
+
+            0.75
+
+        )
+
+
+        next_key = discretize(
+            next_state
+        )
+
+
+        next_allowed = feasible_actions(
+
+            inv,
+
+            dem,
+
+            route,
+
+            capacity
+
+        )
+
+
+        # ----------------------------------------------------
+        # Update agents
+        # ----------------------------------------------------
+
+        tl_agent.update(
+
+            state_key,
+
+            act_tl,
+
+            reward,
+
+            next_key,
+
+            next_allowed
+
+        )
+
+
+        rd3p_agent.update(
+
+            state_key,
+
+            act_rd,
+
+            reward,
+
+            next_key,
+
+            next_allowed
+
+        )
+
+
+# ============================================================
+# 7. GIS MAP
+# ============================================================
+
+def build_tactical_gis_map(
+
+    route_health,
+
+    chosen_action,
+
+    sector_stock_ratio
+
+):
+
+    """
+    Creates the GIS visualization.
+
+    OpenStreetMap is used so the application does not require
+    a CartoDB/Google Maps API key.
+    """
+
+    m = folium.Map(
+
+        location=[
+            34.4800,
+            77.6500
+        ],
+
+        zoom_start=9,
+
+        tiles="OpenStreetMap",
+
+        control_scale=True
+
+    )
+
+
+    # --------------------------------------------------------
+    # Primary route
+    # --------------------------------------------------------
+
+    primary_color = (
+
+        "#3d7a42"
+
+        if route_health >= 0.55
+
+        else "#8f3e3e"
+
+    )
+
+
+    folium.PolyLine(
+
+        PRIMARY_ROUTE,
+
+        color=primary_color,
+
+        weight=4,
+
+        opacity=0.85,
+
+        tooltip=(
+
+            "Main Corridor // Health: "
+
+            f"{route_health * 100:.1f}%"
+
+        )
+
+    ).add_to(m)
+
+
+    # --------------------------------------------------------
+    # Alternate route
+    # --------------------------------------------------------
+
+    if (
+
+        route_health < 0.55
+
+        or chosen_action
+        == "ALTERNATE ROUTE"
+
+    ):
+
+        folium.PolyLine(
+
+            ALTERNATE_ROUTE,
+
+            color="#a38c44",
+
+            weight=4,
+
+            dash_array="6, 6",
+
+            opacity=0.9,
+
+            tooltip=(
+
+                "TACTICAL BYPASS CORRIDOR "
+                "(ACTIVE RE-ROUTE)"
+
+            )
+
+        ).add_to(m)
+
+
+    # --------------------------------------------------------
+    # Nodes
+    # --------------------------------------------------------
+
+    for code, info in NODES.items():
+
+        node_color = "#4c6b4f"
+
+
+        if (
+
+            code == "POST_SIERRA"
+
+            and sector_stock_ratio < 0.55
+
+        ):
+
+            node_color = "#994747"
+
+
+        folium.CircleMarker(
+
+            location=[
+
+                info["lat"],
+
+                info["lon"]
+
+            ],
+
+            radius=8,
+
+            color=node_color,
+
+            fill=True,
+
+            fill_color=node_color,
+
+            fill_opacity=0.9,
+
+            popup=(
+
+                f"<b>{info['name']}</b>"
+
+                f"<br>Designation: "
+                f"{info['role']}"
+
+            )
+
+        ).add_to(m)
+
+
+    # --------------------------------------------------------
+    # Fit map to routes
+    # --------------------------------------------------------
+
+    all_points = (
+
+        PRIMARY_ROUTE
+        + ALTERNATE_ROUTE
+
+    )
+
+
+    m.fit_bounds([
+
+        [
+
+            min(
+                p[0]
+                for p in all_points
+            ),
+
+            min(
+                p[1]
+                for p in all_points
+            )
+
+        ],
+
+        [
+
+            max(
+                p[0]
+                for p in all_points
+            ),
+
+            max(
+                p[1]
+                for p in all_points
+            )
+
+        ]
+
+    ])
+
+
+    return m._repr_html_()
+
+
+# ============================================================
+# 8. UNIFIED INFERENCE / DECISION ENGINE
+# ============================================================
+
+def execute_logistics_matrix(
+
+    month_idx,
+
+    inventory,
+
+    operational_surge,
+
+    weather,
+
+    route,
+
+    capacity,
+
+    trend,
+
+    priority
+
+):
+
+    # --------------------------------------------------------
+    # ML demand forecast
+    # --------------------------------------------------------
+
+    demand = forecast_demand(
+
+        int(month_idx),
+
+        float(
+            operational_surge
+        )
+
+    )
+
+
+    # --------------------------------------------------------
+    # State
+    # --------------------------------------------------------
+
+    state_vec = make_state(
+
+        inventory,
+
+        demand,
+
+        weather,
+
+        route,
+
+        capacity,
+
+        trend,
+
+        priority
+
+    )
+
+
+    state_key = discretize(
+        state_vec
+    )
+
+
+    # --------------------------------------------------------
+    # Feasibility
+    # --------------------------------------------------------
+
+    allowed = feasible_actions(
+
+        inventory,
+
+        demand,
+
+        route,
+
+        capacity
+
+    )
+
+
+    # --------------------------------------------------------
+    # Retrieve learned policies
+    # --------------------------------------------------------
+
+    tl_q = tl_agent.q_values(
+        state_key
+    )
+
+
+    rd_q = rd3p_agent.q_values(
+        state_key
+    )
+
+
+    # --------------------------------------------------------
+    # Normalize policy scores
+    # --------------------------------------------------------
+
+    def norm_scores(q_arr):
+
+        sub = np.array(
+
+            [
+                q_arr[a]
+                for a in allowed
+            ],
+
+            dtype=np.float64
+
+        )
+
+
+        spread = np.ptp(
+            sub
+        )
+
+
+        if spread < 1e-9:
+
+            return {
+
+                a:
+                1.0 / len(allowed)
+
+                for a
+                in allowed
+
+            }
+
+
+        minimum = np.min(
+            sub
+        )
+
+
+        return {
+
+            a:
+
+            float(
+
+                (
+                    q_arr[a]
+                    - minimum
+                )
+                / spread
+
+            )
+
+            for a
+            in allowed
+
+        }
+
+
+    tl_norm = norm_scores(
+        tl_q
+    )
+
+
+    rd_norm = norm_scores(
+        rd_q
+    )
+
+
+    # --------------------------------------------------------
+    # 50/50 Ensemble
+    # --------------------------------------------------------
+
+    ensemble = {
+
+        a:
+
+        0.50 * tl_norm[a]
+
+        + 0.50 * rd_norm[a]
+
+        for a
+        in allowed
+
     }
 
+
+    # --------------------------------------------------------
+    # Final action
+    # --------------------------------------------------------
+
+    final_action = ACTIONS[
+
+        max(
+
+            allowed,
+
+            key=lambda a:
+            ensemble[a]
+
+        )
+
+    ]
+
+
+    tactical_choice = ACTIONS[
+
+        max(
+
+            allowed,
+
+            key=lambda a:
+            tl_norm[a]
+
+        )
+
+    ]
+
+
+    strategic_choice = ACTIONS[
+
+        max(
+
+            allowed,
+
+            key=lambda a:
+            rd_norm[a]
+
+        )
+
+    ]
+
+
+    # --------------------------------------------------------
+    # Risk
+    # --------------------------------------------------------
+
+    coverage_ratio = (
+
+        inventory
+        / max(
+            demand,
+            1.0
+        )
+
+    )
+
+
+    shortage = max(
+
+        0.0,
+
+        demand
+        - inventory
+
+    )
+
+
+    risk_score = (
+
+        0.40
+        * min(
+
+            1.0,
+
+            max(
+                0.0,
+                1.0 - coverage_ratio
+            )
+            / 0.70
+
+        )
+
+        + 0.20 * weather
+
+        + 0.20 * (
+            1.0 - route
+        )
+
+        + 0.15 * (
+            1.0 - capacity
+        )
+
+        + 0.05 * priority
+
+    )
+
+
+    if risk_score >= 0.65:
+
+        risk_tier = "CRITICAL"
+
+    elif risk_score >= 0.45:
+
+        risk_tier = "HIGH"
+
+    elif risk_score >= 0.25:
+
+        risk_tier = "MEDIUM"
+
+    else:
+
+        risk_tier = "LOW"
+
+
+    # --------------------------------------------------------
+    # Scoring table
+    # --------------------------------------------------------
+
+    score_rows = []
+
+
+    for aid, name in enumerate(
+        ACTIONS
+    ):
+
+        if aid in allowed:
+
+            score_rows.append([
+
+                name,
+
+                round(
+                    tl_norm[aid],
+                    4
+                ),
+
+                round(
+                    rd_norm[aid],
+                    4
+                ),
+
+                round(
+                    ensemble[aid],
+                    4
+                ),
+
+                "FEASIBLE"
+
+            ])
+
+        else:
+
+            score_rows.append([
+
+                name,
+
+                None,
+
+                None,
+
+                None,
+
+                "FILTERED"
+
+            ])
+
+
+    score_df = pd.DataFrame(
+
+        score_rows,
+
+        columns=[
+
+            "Action",
+
+            "Tactical Policy",
+
+            "Strategic Policy",
+
+            "Ensemble Score",
+
+            "Operational Status"
+
+        ]
+
+    )
+
+
+    # --------------------------------------------------------
+    # GIS
+    # --------------------------------------------------------
+
+    map_html = build_tactical_gis_map(
+
+        route,
+
+        final_action,
+
+        coverage_ratio
+
+    )
+
+
+    # --------------------------------------------------------
+    # Text output
+    # --------------------------------------------------------
+
+    directive_text = (
+
+        "# [DISPATCH DIRECTIVE] : "
+
+        f"{final_action}"
+
+    )
+
+
+    telemetry_summary = (
+
+        f"**FORECAST DEMAND (ML)** : "
+        f"{demand:,.0f} UNITS\n\n"
+
+        f"**ON-HAND STOCK**        : "
+        f"{inventory:,.0f} UNITS\n\n"
+
+        f"**COVERAGE RATIO**       : "
+        f"{coverage_ratio:.2f} PERIODS\n\n"
+
+        f"**PROJECTED SHORTAGE**   : "
+        f"{shortage:,.0f} UNITS\n\n"
+
+        f"**RISK ASSESSMENT**      : "
+        f"{risk_tier} "
+        f"(INDEX: {risk_score:.3f})"
+
+    )
+
+
+    consensus_text = (
+
+        f"**TACTICAL DIRECTIVE**   : "
+        f"{tactical_choice}\n\n"
+
+        f"**STRATEGIC DIRECTIVE**  : "
+        f"{strategic_choice}\n\n"
+
+        f"**CONSENSUS STATE**       : "
+
+        + (
+
+            "UNANIMOUS"
+
+            if tactical_choice
+            == strategic_choice
+
+            else
+            "RESOLVED VIA 50/50 ENSEMBLE"
+
+        )
+
+    )
+
+
+    return (
+
+        directive_text,
+
+        telemetry_summary,
+
+        consensus_text,
+
+        score_df,
+
+        map_html
+
+    )
+
+
 # ============================================================
-# 11. GRADIO FRONTEND (MUTED TACTICAL PALETTE // NO TL / RD3P)
+# 9. GRADIO UI
 # ============================================================
 
 tactical_css = """
+
 :root {
+
     --tac-bg: #111411;
+
     --tac-surface: #181d18;
+
     --tac-border: #2a332a;
-    --tac-border-focus: #424e42;
+
     --tac-text-main: #bcc6b9;
-    --tac-text-dim: #737f70;
+
     --tac-accent: #8b9986;
-    --tac-code-bg: #0d100d;
+
 }
 
-body, .gradio-container {
-    background-color: var(--tac-bg) !important;
-    color: var(--tac-text-main) !important;
-    font-family: "Lucida Console", Monaco, "Courier New", monospace !important;
-    max-width: 1350px !important;
+
+body,
+.gradio-container {
+
+    background-color:
+        var(--tac-bg)
+        !important;
+
+    color:
+        var(--tac-text-main)
+        !important;
+
+    font-family:
+        "Lucida Console",
+        Monaco,
+        monospace
+        !important;
+
+    max-width:
+        1400px
+        !important;
+
 }
 
-div[class*="block"], div[class*="panel"], div[class*="form"] {
-    background-color: var(--tac-surface) !important;
-    border: 1px solid var(--tac-border) !important;
-    border-radius: 2px !important;
+
+div[class*="block"] {
+
+    background-color:
+        var(--tac-surface)
+        !important;
+
+    border:
+        1px solid
+        var(--tac-border)
+        !important;
+
+    border-radius:
+        2px
+        !important;
+
 }
 
-h1, h2, h3, h4 {
-    color: var(--tac-text-main) !important;
-    text-transform: uppercase !important;
-    letter-spacing: 1.5px !important;
-    font-weight: 700 !important;
-}
 
 .decision_terminal {
-    background-color: var(--tac-code-bg) !important;
-    border-left: 3px solid var(--tac-accent) !important;
-    padding: 12px !important;
-    margin-bottom: 12px !important;
+
+    background-color:
+        #0d100d
+        !important;
+
+    border-left:
+        3px solid
+        var(--tac-accent)
+        !important;
+
+    padding:
+        12px
+        !important;
+
+    margin-bottom:
+        12px
+        !important;
+
 }
 
-.decision_terminal h1 {
-    font-size: 22px !important;
-    margin: 0 !important;
-    color: var(--tac-text-main) !important;
-}
 
 button.primary-btn {
-    background-color: #242c24 !important;
-    color: #cad6c7 !important;
-    border: 1px solid #3b463a !important;
-    text-transform: uppercase !important;
-    font-weight: 700 !important;
-    border-radius: 0px !important;
-    letter-spacing: 2px !important;
+
+    background-color:
+        #242c24
+        !important;
+
+    color:
+        #cad6c7
+        !important;
+
+    border:
+        1px solid
+        #3b463a
+        !important;
+
+    text-transform:
+        uppercase
+        !important;
+
+    font-weight:
+        700
+        !important;
+
+    letter-spacing:
+        2px
+        !important;
+
 }
 
-button.primary-btn:hover {
-    background-color: #2d382d !important;
-    border-color: #556353 !important;
-}
-
-input, textarea {
-    background-color: #141714 !important;
-    color: #cad6c7 !important;
-    border: 1px solid var(--tac-border) !important;
-    border-radius: 0px !important;
-    font-family: inherit !important;
-}
-
-input:focus {
-    border-color: var(--tac-border-focus) !important;
-}
-
-table {
-    border-collapse: collapse !important;
-    width: 100% !important;
-    font-size: 12px !important;
-}
-
-th {
-    background-color: #141914 !important;
-    color: var(--tac-text-dim) !important;
-    text-transform: uppercase !important;
-    border-bottom: 1px solid var(--tac-border) !important;
-}
-
-td {
-    border: 1px solid #1f251f !important;
-    color: var(--tac-text-main) !important;
-}
 """
 
-def ui_calculate_decision(month, inv, dem, weather, route, cap, trend, priority):
-    res = run_logistics_decision(month, inv, dem, weather, route, cap, trend, priority)
-
-    decision_header = f"# [DISPATCH DIRECTIVE] : {res['final_action']}"
-
-    threat_telemetry = (
-        f"**RISK CLASSIFICATION** : {res['risk_level']}\n\n"
-        f"**THREAT INDEX**        : {res['risk_score']:.4f}\n\n"
-        f"**DIRECTIVE CONFIDENCE** : {res['confidence']}"
-    )
-
-    supply_telemetry = (
-        f"**FORECAST DEMAND**     : {res['base_forecast']:,.0f} UNITS\n\n"
-        f"**OPERATIONAL DEMAND**  : {res['demand']:,.0f} UNITS\n\n"
-        f"**STOCK ON HAND**       : {res['inventory']:,.0f} UNITS\n\n"
-        f"**COVERAGE RATIO**      : {res['coverage']:.2f} PERIODS\n\n"
-        f"**SHORTAGE MARGIN**     : {res['shortage']:,.0f} UNITS ({res['shortage_percent']:.1f}%)\n\n"
-        f"**ROUTE HEALTH**        : {res['route'] * 100:.1f}%\n\n"
-        f"**CAPACITY HEADROOM**   : {res['capacity'] * 100:.1f}%"
-    )
-
-    policy_telemetry = (
-        f"### MODEL CONSENSUS EVALUATION\n\n"
-        f"**TACTICAL DIRECTIVE**   : {res['tl_action']}\n\n"
-        f"**STRATEGIC DIRECTIVE**  : {res['rd_action']}\n\n"
-        f"**UNANIMOUS AGREEMENT**  : {'YES' if res['policy_agreement'] else 'NO (RESOLVED VIA ENSEMBLE)'}\n\n"
-        f"**MARGIN SEPARATION**    : {res['score_gap']:.4f}\n\n"
-        f"**OPERATIONAL RATIONALE**: {res['reason']}"
-    )
-
-    state_matrix = pd.DataFrame([
-        ["MONTH INDEX", res["month"] + 1],
-        ["DEMAND (BASE)", f"{res['base_forecast']:,.2f}"],
-        ["DEMAND (EFFECTIVE)", f"{res['demand']:,.2f}"],
-        ["INVENTORY ON HAND", f"{res['inventory']:,.2f}"],
-        ["COVERAGE RATIO", f"{res['coverage']:.3f}"],
-        ["WEATHER STRESS INDEX", f"{res['weather']:.3f}"],
-        ["PRIMARY ROUTE INTEGRITY", f"{res['route']:.3f}"],
-        ["TRANSPORT CAPACITY", f"{res['capacity']:.3f}"],
-        ["DEMAND TREND COEFFICIENT", f"{res['trend']:+.3f}"],
-        ["SECTOR PRIORITY TIER", f"{res['priority']:.3f}"]
-    ], columns=["OPERATIONAL PARAMETER", "METRIC"])
-
-    return decision_header, threat_telemetry, supply_telemetry, policy_telemetry, state_matrix, res["policy_score_df"]
-
-with gr.Blocks(css=tactical_css, title="Logistics Tactical Command Console") as app:
-    gr.Markdown("## LOGISTICS TACTICAL COMMAND // DIRECTIVE CONTROLLER")
-    gr.Markdown("SYSTEM ARCHITECTURE: DEMAND PROJECTION + DUAL-POLICY ENSEMBLE DECISION ENGINE")
-
-    with gr.Tab("COMMAND DISPATCH"):
-        with gr.Row():
-            with gr.Column():
-                ui_month = gr.Slider(0, 5, value=0, step=1, label="FORECAST MONTH [0-5]")
-                ui_inv = gr.Number(value=15000, label="ON-HAND INVENTORY")
-                ui_dem = gr.Number(value=float(forecast_values[0]), label="DEMAND VALUE")
-                ui_trend = gr.Slider(-0.20, 0.50, value=0.00, step=0.01, label="DEMAND TREND")
-            with gr.Column():
-                ui_weather = gr.Slider(0.0, 1.0, value=0.20, step=0.01, label="WEATHER STRESS")
-                ui_route = gr.Slider(0.0, 1.0, value=1.00, step=0.01, label="ROUTE INTEGRITY")
-                ui_cap = gr.Slider(0.0, 1.0, value=1.00, step=0.01, label="FLEET CAPACITY")
-                ui_pri = gr.Slider(0.0, 1.0, value=0.50, step=0.01, label="SECTOR PRIORITY")
-
-        run_btn = gr.Button("EXECUTE DECISION MATRIX", elem_classes=["primary-btn"])
-
-        out_decision = gr.Markdown(elem_classes=["decision_terminal"])
-
-        with gr.Row():
-            out_threat = gr.Markdown()
-            out_supply = gr.Markdown()
-
-        out_policy = gr.Markdown()
-
-        with gr.Row():
-            out_matrix = gr.Dataframe(interactive=False, label="INPUT TELEMETRY STATE")
-            out_scores = gr.Dataframe(interactive=False, label="POLICY SCORING MATRIX")
-
-        ui_month.change(
-            fn=lambda m: float(forecast_values[int(np.clip(m, 0, len(forecast_values)-1))]),
-            inputs=ui_month,
-            outputs=ui_dem
-        )
-
-        run_btn.click(
-            fn=ui_calculate_decision,
-            inputs=[ui_month, ui_inv, ui_dem, ui_weather, ui_route, ui_cap, ui_trend, ui_pri],
-            outputs=[out_decision, out_threat, out_supply, out_policy, out_matrix, out_scores]
-        )
-
-    with gr.Tab("SYSTEM AUDIT RECORDS"):
-        forecast_df = pd.DataFrame({"MONTH": np.arange(1, len(forecast_values)+1), "DEMAND": forecast_values})
-        gr.Dataframe(forecast_df, label="ACTIVE SIX-MONTH BASELINE PROJECTION")
 
 # ============================================================
-# 12. CLOUD & LOCAL ENTRY POINT
+# APPLICATION
+# ============================================================
+
+with gr.Blocks(
+
+    css=tactical_css,
+
+    title=
+        "Tactical GIS Predictive Logistics"
+
+) as app:
+
+    gr.Markdown(
+
+        "## PREDICTIVE LOGISTICS "
+        "MANAGEMENT SYSTEM "
+        "// COMMAND CONSOLE"
+
+    )
+
+
+    gr.Markdown(
+
+        "TECHNOLOGY STACK: "
+        "POLYNOMIAL TEMPORAL DEMAND "
+        "FORECASTING + "
+        "DUAL RL CONSENSUS + "
+        "TACTICAL GIS ROUTE OPTIMIZATION"
+
+    )
+
+
+    with gr.Row():
+
+        # ----------------------------------------------------
+        # INPUTS
+        # ----------------------------------------------------
+
+        with gr.Column(
+            scale=1
+        ):
+
+            gr.Markdown(
+                "### OPERATIONAL TELEMETRY INPUTS"
+            )
+
+
+            in_month = gr.Slider(
+
+                0,
+                5,
+
+                value=0,
+
+                step=1,
+
+                label=
+                    "FORECAST HORIZON "
+                    "[MONTH 0-5]"
+
+            )
+
+
+            in_inv = gr.Number(
+
+                value=11000,
+
+                label=
+                    "CURRENT STOCK "
+                    "(UNITS)"
+
+            )
+
+
+            in_surge = gr.Slider(
+
+                0.8,
+                2.0,
+
+                value=1.0,
+
+                step=0.1,
+
+                label=
+                    "OP TEMPO SURGE "
+                    "MULTIPLIER"
+
+            )
+
+
+            in_weather = gr.Slider(
+
+                0.0,
+                1.0,
+
+                value=0.30,
+
+                step=0.05,
+
+                label=
+                    "TERRAIN / WEATHER "
+                    "FRICTION"
+
+            )
+
+
+            in_route = gr.Slider(
+
+                0.0,
+                1.0,
+
+                value=0.90,
+
+                step=0.05,
+
+                label=
+                    "LINE-OF-COMMUNICATION "
+                    "INTEGRITY"
+
+            )
+
+
+            in_cap = gr.Slider(
+
+                0.0,
+                1.0,
+
+                value=0.85,
+
+                step=0.05,
+
+                label=
+                    "FLEET CAPACITY "
+                    "HEADROOM"
+
+            )
+
+
+            in_trend = gr.Slider(
+
+                -0.20,
+                0.50,
+
+                value=0.05,
+
+                step=0.05,
+
+                label=
+                    "DEMAND ESCALATION "
+                    "TREND"
+
+            )
+
+
+            in_pri = gr.Slider(
+
+                0.0,
+                1.0,
+
+                value=0.75,
+
+                step=0.05,
+
+                label=
+                    "SECTOR STRATEGIC "
+                    "PRIORITY"
+
+            )
+
+
+            btn_exec = gr.Button(
+
+                "EXECUTE LOGISTICS DISPATCH",
+
+                elem_classes=[
+                    "primary-btn"
+                ]
+
+            )
+
+
+        # ----------------------------------------------------
+        # OUTPUTS
+        # ----------------------------------------------------
+
+        with gr.Column(
+            scale=2
+        ):
+
+            out_directive = gr.Markdown(
+
+                elem_classes=[
+                    "decision_terminal"
+                ]
+
+            )
+
+
+            with gr.Row():
+
+                out_telemetry = (
+                    gr.Markdown()
+                )
+
+                out_consensus = (
+                    gr.Markdown()
+                )
+
+
+            out_scores = gr.Dataframe(
+
+                label=
+                    "ACTION SCORING MATRIX "
+                    "(FEASIBILITY RESTRICTED)"
+
+            )
+
+
+            gr.Markdown(
+
+                "### GIS SITUATIONAL "
+                "CORRIDOR & CHOKEPOINT MAP"
+
+            )
+
+
+            out_map = gr.HTML(
+
+                label=
+                    "LIVE OPERATIONAL MAP"
+
+            )
+
+
+    # --------------------------------------------------------
+    # EXECUTION EVENT
+    # --------------------------------------------------------
+
+    btn_exec.click(
+
+        fn=execute_logistics_matrix,
+
+        inputs=[
+
+            in_month,
+
+            in_inv,
+
+            in_surge,
+
+            in_weather,
+
+            in_route,
+
+            in_cap,
+
+            in_trend,
+
+            in_pri
+
+        ],
+
+        outputs=[
+
+            out_directive,
+
+            out_telemetry,
+
+            out_consensus,
+
+            out_scores,
+
+            out_map
+
+        ]
+
+    )
+
+
+# ============================================================
+# 10. RENDER SERVER STARTUP
 # ============================================================
 
 if __name__ == "__main__":
-    server_port = int(os.environ.get("PORT", 7860))
+
+    print()
+    print("=" * 70)
+    print(
+        "TACTICAL PREDICTIVE LOGISTICS "
+        "MANAGEMENT SYSTEM"
+    )
+    print("=" * 70)
+
+
+    # --------------------------------------------------------
+    # Render provides PORT automatically.
+    # --------------------------------------------------------
+
+    port_value = os.environ.get(
+        "PORT",
+        "7860"
+    )
+
+
+    try:
+
+        port = int(
+            port_value
+        )
+
+    except ValueError:
+
+        port = 7860
+
+
+    print(
+        f"Starting Gradio on port: {port}"
+    )
+
+    print(
+        "Host: 0.0.0.0"
+    )
+
+    print(
+        "Map: OpenStreetMap"
+    )
+
+    print(
+        "External API key: NONE"
+    )
+
+    print(
+        "Gradio share: DISABLED"
+    )
+
+    print("=" * 70)
+
+
     app.launch(
+
         server_name="0.0.0.0",
-        server_port=server_port,
-        share=False
+
+        server_port=port,
+
+        share=False,
+
+        show_error=True
+
     )

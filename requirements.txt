@@ -1,3 +1,5 @@
-gradio>=4.0.0
-numpy
+gradio
+folium
+scikit-learn
 pandas
+numpy

@@ -18,7 +18,6 @@
 import os
 import random
 import warnings
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -27,6 +26,11 @@ import folium
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.pipeline import make_pipeline
+
+# PERFORMANCE FIX ONLY:
+# Exact nearest-state lookup, replacing the slow Python
+# min(..., key=...) search used repeatedly during RL training.
+from scipy.spatial import cKDTree
 
 try:
     import gradio as gr
@@ -302,8 +306,6 @@ def feasible_actions(
         range(len(ACTIONS))
     )
 
-    # Healthy primary route:
-    # alternate routing is unnecessary.
     if (
         route >= 0.70
         and ACTION_IDS["ALTERNATE ROUTE"] in allowed
@@ -312,8 +314,6 @@ def feasible_actions(
             ACTION_IDS["ALTERNATE ROUTE"]
         )
 
-    # Adequate fleet capacity:
-    # reserve capacity is unnecessary.
     if (
         capacity >= 0.70
         and ACTION_IDS["RESERVE CAPACITY"] in allowed
@@ -322,8 +322,6 @@ def feasible_actions(
             ACTION_IDS["RESERVE CAPACITY"]
         )
 
-    # Healthy inventory:
-    # aggressive replenishment is unnecessary.
     if coverage >= 1.10:
 
         for action in [
@@ -367,6 +365,12 @@ class TLRLAgent:
         - inactive counterfactual memory
         - Q-values
         - visit statistics
+
+    PERFORMANCE OPTIMIZATION:
+        The original nearest-state Python scan has been
+        replaced by an exact cKDTree lookup.
+
+    The RL logic itself is unchanged.
     """
 
     def __init__(self):
@@ -375,6 +379,31 @@ class TLRLAgent:
         self.active_lane = {}
         self.inactive_memory = {}
         self.visit_counts = {}
+
+        # ----------------------------------------------------
+        # PERFORMANCE INDEX
+        # ----------------------------------------------------
+
+        self._state_order = []
+        self._state_index = {}
+        self._state_tree = None
+        self._tree_points = None
+
+    def _rebuild_state_tree(self):
+
+        if not self._state_order:
+            self._state_tree = None
+            self._tree_points = None
+            return
+
+        self._tree_points = np.asarray(
+            self._state_order,
+            dtype=np.float64,
+        )
+
+        self._state_tree = cKDTree(
+            self._tree_points
+        )
 
     def _ensure_state(self, state_key):
 
@@ -387,6 +416,19 @@ class TLRLAgent:
 
             self.visit_counts[state_key] = 0
 
+            # Keep insertion order exactly as
+            # the original dictionary did.
+            self._state_index[
+                state_key
+            ] = len(self._state_order)
+
+            self._state_order.append(
+                state_key
+            )
+
+            # Exact nearest-neighbour index.
+            self._rebuild_state_tree()
+
     def q_values(self, state_key):
 
         if state_key in self.q:
@@ -394,26 +436,68 @@ class TLRLAgent:
 
         if len(self.q) > 0:
 
-            target = np.array(
+            target = np.asarray(
                 state_key,
-                dtype=np.float32,
+                dtype=np.float64,
             )
 
-            nearest = min(
-                self.q.keys(),
-                key=lambda x:
-                    np.sum(
-                        (
-                            np.array(
-                                x,
-                                dtype=np.float32,
-                            )
-                            - target
-                        ) ** 2
-                    ),
+            # ------------------------------------------------
+            # EXACT nearest-state lookup
+            # ------------------------------------------------
+            #
+            # This replaces:
+            #
+            # min(
+            #     self.q.keys(),
+            #     key=lambda x:
+            #         np.sum(
+            #             (np.array(x) - target)**2
+            #         )
+            # )
+            #
+            # cKDTree performs the nearest search in
+            # compiled code instead of repeatedly executing
+            # Python distance calculations.
+            # ------------------------------------------------
+
+            distance, index = (
+                self._state_tree.query(
+                    target,
+                    k=1,
+                )
             )
 
-            return self.q[nearest].copy()
+            # Preserve the original tie behaviour as closely
+            # as possible: find all states at the same
+            # distance and select the earliest dictionary
+            # insertion.
+            candidate_indices = (
+                self._state_tree.query_ball_point(
+                    target,
+                    r=float(distance) + 1e-12,
+                )
+            )
+
+            if len(candidate_indices) == 1:
+
+                nearest = self._state_order[
+                    int(index)
+                ]
+
+            else:
+
+                nearest_index = min(
+                    candidate_indices,
+                    key=lambda i: i,
+                )
+
+                nearest = self._state_order[
+                    nearest_index
+                ]
+
+            return self.q[
+                nearest
+            ].copy()
 
         self._ensure_state(
             state_key
@@ -541,6 +625,31 @@ class RD3PAgent:
 
         self.smoothed_q = {}
 
+        # ----------------------------------------------------
+        # PERFORMANCE INDEX
+        # ----------------------------------------------------
+
+        self._state_order = []
+        self._state_index = {}
+        self._state_tree = None
+        self._tree_points = None
+
+    def _rebuild_state_tree(self):
+
+        if not self._state_order:
+            self._state_tree = None
+            self._tree_points = None
+            return
+
+        self._tree_points = np.asarray(
+            self._state_order,
+            dtype=np.float64,
+        )
+
+        self._state_tree = cKDTree(
+            self._tree_points
+        )
+
     def _ensure_state(self, state_key):
 
         if state_key not in self.q:
@@ -564,6 +673,19 @@ class RD3PAgent:
                 dtype=np.float64,
             )
 
+        # Only add to the nearest-state index once.
+        if state_key not in self._state_index:
+
+            self._state_index[
+                state_key
+            ] = len(self._state_order)
+
+            self._state_order.append(
+                state_key
+            )
+
+            self._rebuild_state_tree()
+
     def q_values(self, state_key):
 
         if state_key in self.q:
@@ -571,26 +693,45 @@ class RD3PAgent:
 
         if len(self.q) > 0:
 
-            target = np.array(
+            target = np.asarray(
                 state_key,
-                dtype=np.float32,
+                dtype=np.float64,
             )
 
-            nearest = min(
-                self.q.keys(),
-                key=lambda x:
-                    np.sum(
-                        (
-                            np.array(
-                                x,
-                                dtype=np.float32,
-                            )
-                            - target
-                        ) ** 2
-                    ),
+            distance, index = (
+                self._state_tree.query(
+                    target,
+                    k=1,
+                )
             )
 
-            return self.q[nearest].copy()
+            candidate_indices = (
+                self._state_tree.query_ball_point(
+                    target,
+                    r=float(distance) + 1e-12,
+                )
+            )
+
+            if len(candidate_indices) == 1:
+
+                nearest = self._state_order[
+                    int(index)
+                ]
+
+            else:
+
+                nearest_index = min(
+                    candidate_indices,
+                    key=lambda i: i,
+                )
+
+                nearest = self._state_order[
+                    nearest_index
+                ]
+
+            return self.q[
+                nearest
+            ].copy()
 
         self._ensure_state(
             state_key
@@ -2324,10 +2465,6 @@ with gr.Blocks(
             scale=2,
         ):
 
-            # ------------------------------------------------
-            # Decision
-            # ------------------------------------------------
-
             out_directive = gr.Markdown(
                 """
                 ## ◼ DISPATCH DIRECTIVE
@@ -2338,10 +2475,6 @@ with gr.Blocks(
                     "directive-panel"
                 ],
             )
-
-            # ------------------------------------------------
-            # Telemetry cards
-            # ------------------------------------------------
 
             with gr.Row():
 
@@ -2379,10 +2512,6 @@ with gr.Blocks(
                         "consensus-card"
                     ],
                 )
-
-            # ------------------------------------------------
-            # Action matrix
-            # ------------------------------------------------
 
             gr.Markdown(
                 "### ▣ DECISION MATRIX / FEASIBILITY MASK",

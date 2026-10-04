@@ -1,5 +1,6 @@
-gradio
-folium
-scikit-learn
-pandas
-numpy
+numpy>=1.24.0
+scipy>=1.10.0
+pandas>=2.0.0
+scikit-learn>=1.2.0
+folium>=0.14.0
+gradio>=4.0.0

@@ -1,0 +1,136 @@
+:root {
+    --bg: #080b08;
+    --bg-2: #0c100c;
+    --panel: #111711;
+    --panel-2: #151b15;
+    --border: #293329;
+    --text: #c7d0c2;
+    --muted: #7e8979;
+    --green: #8fa66d;
+    --green-bright: #a9c47f;
+    --amber: #c59b4c;
+    --red: #bd4d4d;
+    --grid: rgba(139, 160, 112, 0.055);
+}
+
+body, .gradio-container {
+    background:
+        linear-gradient(rgba(8, 11, 8, 0.97), rgba(8, 11, 8, 0.97)),
+        repeating-linear-gradient(0deg, transparent, transparent 31px, var(--grid) 32px),
+        repeating-linear-gradient(90deg, transparent, transparent 31px, var(--grid) 32px) !important;
+    color: var(--text) !important;
+    font-family: "IBM Plex Mono", "JetBrains Mono", monospace !important;
+    max-width: 1600px !important;
+    margin: auto !important;
+}
+
+.gradio-container * { border-radius: 2px !important; }
+
+.command-header {
+    background: linear-gradient(90deg, #101610, #182018, #101610) !important;
+    border: 1px solid #394737 !important;
+    border-left: 4px solid var(--green) !important;
+    padding: 18px 22px !important;
+    margin-bottom: 10px !important;
+    box-shadow: 0 0 24px rgba(0, 0, 0, 0.45) !important;
+}
+
+.command-title {
+    color: #d5ddcf !important;
+    font-size: 25px !important;
+    font-weight: 800 !important;
+    letter-spacing: 3px !important;
+    margin-bottom: 5px !important;
+}
+
+.command-subtitle {
+    color: var(--muted) !important;
+    font-size: 11px !important;
+    letter-spacing: 2px !important;
+}
+
+.status-bar {
+    background: #0d120d !important;
+    border: 1px solid var(--border) !important;
+    padding: 8px 14px !important;
+    color: var(--green-bright) !important;
+    font-size: 11px !important;
+    letter-spacing: 1.4px !important;
+    margin-bottom: 10px !important;
+}
+
+.section-header {
+    color: #aeb9a5 !important;
+    font-size: 11px !important;
+    font-weight: 800 !important;
+    letter-spacing: 2px !important;
+    text-transform: uppercase !important;
+    border-bottom: 1px solid #303b30 !important;
+    padding-bottom: 7px !important;
+    margin-bottom: 9px !important;
+}
+
+.command-panel {
+    background: linear-gradient(145deg, #111711, #0d120d) !important;
+    border: 1px solid var(--border) !important;
+    padding: 12px !important;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.015), 0 8px 24px rgba(0,0,0,0.22) !important;
+}
+
+input, textarea, button, select {
+    font-family: "IBM Plex Mono", "JetBrains Mono", monospace !important;
+}
+
+input, textarea, .gr-input, .gr-dropdown, .gr-number, .gr-slider {
+    background: #090d09 !important;
+    color: #cbd4c5 !important;
+    border: 1px solid #303a30 !important;
+}
+
+label {
+    color: #889486 !important;
+    font-size: 10px !important;
+    letter-spacing: 1px !important;
+    text-transform: uppercase !important;
+}
+
+.execute-button {
+    background: linear-gradient(180deg, #34442e, #263322) !important;
+    color: #d7e1d0 !important;
+    border: 1px solid #65765a !important;
+    font-size: 13px !important;
+    font-weight: 900 !important;
+    letter-spacing: 2px !important;
+    min-height: 48px !important;
+    text-transform: uppercase !important;
+    box-shadow: 0 0 16px rgba(119, 148, 92, 0.08) !important;
+}
+
+.execute-button:hover {
+    background: linear-gradient(180deg, #40543a, #2e3d29) !important;
+    border-color: #839876 !important;
+}
+
+.directive-panel {
+    background: linear-gradient(135deg, #111811, #0a0e0a) !important;
+    border: 1px solid #3d4c38 !important;
+    border-left: 5px solid var(--green) !important;
+    min-height: 130px !important;
+    padding: 18px !important;
+}
+
+.directive-panel h2 { color: #7f9368 !important; font-size: 12px !important; letter-spacing: 2px !important; }
+.directive-panel h1 { color: #d5dfcf !important; font-size: 25px !important; letter-spacing: 2px !important; text-transform: uppercase !important; }
+
+.telemetry-card { background: #0c110c !important; border: 1px solid #293329 !important; padding: 14px !important; min-height: 190px !important; }
+.telemetry-card h3 { color: #7e8d74 !important; font-size: 10px !important; letter-spacing: 1.7px !important; }
+
+.risk-card { background: linear-gradient(145deg, #15120d, #0e0f0b) !important; border: 1px solid #493e29 !important; padding: 14px !important; }
+.consensus-card { background: linear-gradient(145deg, #0e140e, #0a0d0a) !important; border: 1px solid #34432f !important; padding: 14px !important; }
+
+.dataframe, table { font-family: "IBM Plex Mono", "JetBrains Mono", monospace !important; font-size: 11px !important; }
+th { background: #1b231a !important; color: #a9b89e !important; text-transform: uppercase !important; letter-spacing: 1px !important; }
+td { background: #0c100c !important; color: #aeb9a8 !important; }
+
+.map-panel { border: 1px solid #303a30 !important; background: #080b08 !important; padding: 5px !important; }
+.command-footer { border-top: 1px solid #293329 !important; margin-top: 12px !important; padding-top: 8px !important; color: #586255 !important; font-size: 9px !important; letter-spacing: 1.2px !important; text-align: center !important; }
